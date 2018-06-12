@@ -177,7 +177,7 @@ class Ghost(object):
                 prefix = "ghost-" + req["url"] + "-" + \
                     slugify(req["title"])[:50]
                 temp_file_handle, temp_file_name = mkstemp(prefix=prefix,
-                                                           suffix=".txt",
+                                                           suffix=".py",
                                                            text=True)
                 self.nvim.command("ed %s" % temp_file_name)
                 self.nvim.current.buffer[:] = req["text"].split("\n")
