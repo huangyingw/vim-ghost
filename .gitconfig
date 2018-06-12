@@ -1,0 +1,15 @@
+[merge]
+    allow = true
+[commit]
+    message = n
+[remote "github"]
+    url = git@github.com:huangyingw/vim-ghost.git
+    fetch = +refs/heads/*:refs/remotes/github/*
+[gsync]
+    remote = origin
+    branch = master
+[push]
+    remote = github
+[branch "dev"]
+    remote = origin
+    merge = refs/heads/dev
