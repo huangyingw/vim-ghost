@@ -1,15 +1,21 @@
-[merge]
-    allow = true
-[commit]
-    message = n
+[remote "raghur"]
+    url = git@github.com:raghur/vim-ghost.git
+    fetch = +refs/heads/*:refs/remotes/raghur/*
 [remote "github"]
     url = git@github.com:huangyingw/vim-ghost.git
     fetch = +refs/heads/*:refs/remotes/github/*
-[gsync]
-    remote = origin
-    branch = master
 [push]
     remote = github
+[gsync]
+    remote = raghur
+    branch = master
+[merge]
+    allow = true
 [branch "dev"]
-    remote = origin
+    remote = github
     merge = refs/heads/dev
+[branch "master"]
+    remote = raghur
+    merge = refs/heads/master
+[commit]
+    message = n
