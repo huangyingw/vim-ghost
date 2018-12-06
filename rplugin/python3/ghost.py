@@ -6,9 +6,14 @@ from tempfile import mkstemp
 import logging
 import json
 import os
+import sys
 from SimpleWebSocketServer import SimpleWebSocketServer, WebSocket
-import neovim
-from neovim.api.nvim import NvimError
+try:
+    import neovim
+    from neovim.api.nvim import NvimError
+except ImportError:
+    import pynvim
+    from pynvim.api.nvim import NvimError
 from slugify import slugify
 
 buffer_handler_map = {}
@@ -89,7 +94,9 @@ class Ghost(object):
         self.server_started = False
         self.port = 4001
         self.winapp = None
+        self.darwinapp = None
         self.linux_window_id = None
+        self.cmd = 'ed'
 
     @neovim.command('GhostStart', range='', nargs='0')
     def server_start(self, args, range):
@@ -99,10 +106,15 @@ class Ghost(object):
             logger.info("server already running on port %d", self.port)
             return
 
-        if self.nvim.funcs.exists("g:ghost_port") == 1:
-            self.port = self.nvim.api.get_var("ghost_port")
+        if "ghost_port" in self.nvim.vars:
+            self.port = self.nvim.vars["ghost_port"]
         else:
-            self.nvim.api.set_var("ghost_port", self.port)
+            self.nvim.vars["ghost_port"] = self.port
+
+        if "ghost_cmd" in self.nvim.vars:
+            self.cmd = self.nvim.vars["ghost_cmd"]
+        else:
+            self.nvim.vars["ghost_cmd"] = self.cmd
 
         self.httpserver = MyHTTPServer(self, ('127.0.0.1', self.port),
                                        WebRequestHandler)
@@ -122,10 +134,15 @@ class Ghost(object):
                              self.winapp.process.real)
             except ProcessNotFoundError as pne:
                 logger.warning("No process called nvim-qt found: %s", pne)
-        elif self.nvim.funcs.exists("g:ghost_nvim_window_id") == 1:
+        elif "ghost_nvim_window_id" in self.nvim.vars:
             # for linux
-            self.linux_window_id = self.nvim.api.get_var(
-                "ghost_nvim_window_id").strip()
+            self.linux_window_id = self.nvim.vars["ghost_nvim_window_id"].strip()
+        elif sys.platform.startswith('darwin'):
+            if os.getenv('ITERM_PROFILE', None):
+                self.darwinapp = "iTerm2"
+            elif os.getenv('TERM_PROGRAM', None) == 'Apple_Terminal':
+                self.darwinapp = "Terminal"
+            logger.debug("%s detected" % self.darwinapp)
 
     @neovim.command('GhostStop', range='', nargs='0', sync=True)
     def server_stop(self, args, range):
@@ -179,7 +196,7 @@ class Ghost(object):
                 temp_file_handle, temp_file_name = mkstemp(prefix=prefix,
                                                            suffix=".py",
                                                            text=True)
-                self.nvim.command("ed %s" % temp_file_name)
+                self.nvim.command("%s %s" % (self.cmd, temp_file_name))
                 self.nvim.current.buffer[:] = req["text"].split("\n")
                 bufnr = self.nvim.current.buffer.number
                 delete_cmd = ("au BufDelete <buffer> call"
@@ -198,17 +215,27 @@ class Ghost(object):
             self.nvim.command("echo '%s'" % ex)
 
     def _raise_window(self):
-        if self.linux_window_id:
-            subprocess.call(["xdotool", "windowactivate", self.linux_window_id])
-            logger.debug("activated window: %s", self.linux_window_id)
-        elif self.winapp:
-            logger.debug("WINDOWS: trying to raise window")
-            # dragons - this is the only thing that works.
-            try:
-                self.winapp.windows()[0].set_focus()
-                self.winapp.windows()[0].ShowInTaskbar()
-            except Exception as e:
-                logger.warning("Error during _raise_window, %s", e)
+        try:
+            if self.linux_window_id:
+                subprocess.call(["xdotool", "windowactivate", self.linux_window_id])
+                logger.debug("activated window: %s", self.linux_window_id)
+            elif self.winapp:
+                logger.debug("WINDOWS: trying to raise window")
+                # dragons - this is the only thing that works.
+                try:
+                    self.winapp.windows()[0].set_focus()
+                    self.winapp.windows()[0].ShowInTaskbar()
+                except Exception as e:
+                    logger.warning("Error during _raise_window, %s", e)
+            elif self.darwinapp:
+                logger.debug("Darwin: trying to raise window")
+                subprocess.call(["osascript", "-e",
+                                 'tell application "' + self.darwinapp +
+                                 '" to activate'])
+        except Exception as e:
+            # with vim yarp etc - letting an exception escape messes
+            # with other plugins. so catch everything
+            logger.debug("error while activating window - %s" % e)
 
     def on_message(self, req, websocket):
         self.nvim.async_call(self._handle_on_message, req, websocket)
