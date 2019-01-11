@@ -38,29 +38,34 @@ class GhostWebSocketHandler(WebSocket):
         req = json.loads(self.data)
         logger.info("recd on websocket: %s message: %s",
                     self.address, self.data)
-        self.server.context.on_message(req, self)
+        self.server.ghost.on_message(req, self)
 
     def handleConnected(self):
         logger.debug("Websocket connected %s", self.address)
 
     def handleClose(self):
         logger.debug("Websocket closed event %s ", self.address)
-        self.server.context.on_websocket_close(self)
+        self.server.ghost.on_websocket_close(self)
 
 
 class MyWebSocketServer(SimpleWebSocketServer):
 
-    def __init__(self, context, *args, **kwargs):
-        self.context = context
+    def __init__(self, ghostObj, *args, **kwargs):
+        self.ghost = ghostObj
         SimpleWebSocketServer.__init__(self, *args, **kwargs)
 
 
-def startWebSocketSvr(context, port):
-    websocket_server = MyWebSocketServer(context, '127.0.0.1', port,
-                                         GhostWebSocketHandler)
-    ws_thread = Thread(target=websocket_server.serveforever, daemon=True)
-    ws_thread.start()
-    websocket_servers.append(websocket_server)
+def startWebSocketSvr(ghostObj, port):
+    try:
+        websocket_server = MyWebSocketServer(ghostObj, '127.0.0.1', port,
+                                             GhostWebSocketHandler)
+        ws_thread = Thread(target=websocket_server.serveforever, daemon=True)
+        ws_thread.start()
+        websocket_servers.append(websocket_server)
+        logger.info("Started websocket server on port: %d", port)
+    except BaseException as e:
+        logger.error("Caught error", exc_info=e)
+        raise e
 
 
 class WebRequestHandler(BaseHTTPRequestHandler):
@@ -71,19 +76,38 @@ class WebRequestHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_GET(self):
-        self._set_headers()
-        port = randint(60000, 65535)
-        response_obj = {"ProtocolVersion": 1}
-        response_obj["WebSocketPort"] = port
-        startWebSocketSvr(self.server.context, port)
-        self.wfile.write(json.dumps(response_obj).encode())
+        try:
+            logger.debug("Got GET request")
+            self._set_headers()
+            port = randint(60000, 65535)
+            response_obj = {"ProtocolVersion": 1}
+            response_obj["WebSocketPort"] = port
+            startWebSocketSvr(self.server.ghost, port)
+            self.wfile.write(json.dumps(response_obj).encode())
+            logger.debug("Wrote response %s", response_obj)
+        except BaseException as e:
+            logger.error("Caught error", exc_info=e)
 
 
 class MyHTTPServer(HTTPServer):
 
-    def __init__(self, context, *args, **kwargs):
-        self.context = context
-        HTTPServer.__init__(self, *args, **kwargs)
+    def __init__(self, ghost, *args, **kwargs):
+        self.ghost = ghost
+        self.error = None
+        self.didPrintStartMsg = False
+        try:
+            HTTPServer.__init__(self, *args, **kwargs)
+        except Exception as e:
+            self.error = e
+
+    def service_actions(self):
+        if not self.didPrintStartMsg:
+            logger.info("server started")
+            self.ghost.nvim.async_call(self.ghost.echo,
+                                       "server started on port {0}",
+                                       self.ghost.port)
+            self.ghost.server_started = True
+            self.didPrintStartMsg = True
 
 
 @neovim.plugin
@@ -94,15 +118,30 @@ class Ghost(object):
         self.server_started = False
         self.port = 4001
         self.winapp = None
-        self.darwinapp = None
+        self.darwin_app = None
         self.linux_window_id = None
         self.cmd = 'ed'
 
+    def echo(self, message, *args):
+        msg = message.format(*args)
+        self.nvim.command("echom 'Ghost: {0}'".format(msg))
+
     @neovim.command('GhostStart', range='', nargs='0')
     def server_start(self, args, range):
+        def start_http_server():
+            try:
+                if self.httpserver.error is not None:
+                    raise self.httpserver.error
+                self.httpserver.serve_forever()
+            except Exception as e:
+                self.httpserver.error = e
+                self.server_started = False
+                self.nvim.async_call(self.echo,
+                                     "Error starting server: {0}. Check if port {1} is available",
+                                     self.httpserver.error, self.port)
+
         if self.server_started:
-            self.nvim.command("echo 'Ghost server already running on port %d'"
-                              % self.port)
+            self.echo('server already running on port {0}', self.port)
             logger.info("server already running on port %d", self.port)
             return
 
@@ -116,38 +155,30 @@ class Ghost(object):
         else:
             self.nvim.vars["ghost_cmd"] = self.cmd
 
+        self.darwin_app = self.nvim.vars.get("ghost_darwin_app")
+
         self.httpserver = MyHTTPServer(self, ('127.0.0.1', self.port),
                                        WebRequestHandler)
-        http_server_thread = Thread(target=self.httpserver.serve_forever,
+        http_server_thread = Thread(target=start_http_server,
                                     daemon=True)
         http_server_thread.start()
-        self.server_started = True
-        logger.info("server started")
-        self.nvim.command("echom 'Ghost server started on port %d'"
-                          % self.port)
         if PYWINAUTO:
             # for windows
             try:
                 app = Application().connect(path="nvim-qt.exe", timeout=0.1)
                 self.winapp = app
-                logger.debug("Connected to nvim-qt with process id: %s",
+                logger.debug("Connected to nvim-qt with process id: s",
                              self.winapp.process.real)
             except ProcessNotFoundError as pne:
                 logger.warning("No process called nvim-qt found: %s", pne)
         elif "ghost_nvim_window_id" in self.nvim.vars:
             # for linux
             self.linux_window_id = self.nvim.vars["ghost_nvim_window_id"].strip()
-        elif sys.platform.startswith('darwin'):
-            if os.getenv('ITERM_PROFILE', None):
-                self.darwinapp = "iTerm2"
-            elif os.getenv('TERM_PROGRAM', None) == 'Apple_Terminal':
-                self.darwinapp = "Terminal"
-            logger.debug("%s detected" % self.darwinapp)
 
     @neovim.command('GhostStop', range='', nargs='0', sync=True)
     def server_stop(self, args, range):
         if not self.server_started:
-            self.nvim.command("echo 'Server not running'")
+            self.echo("Server not running")
             return
         self.httpserver.shutdown()
         self.httpserver.socket.close()
@@ -156,7 +187,7 @@ class Ghost(object):
                         server.serversocket.getsockname()[1])
             server.close()
         logger.info("Shutdown websockets and httpd")
-        self.nvim.command("echom 'Ghost server stopped'")
+        self.echo("Ghost server stopped")
         self.server_started = False
 
     @neovim.function("GhostNotify")
@@ -212,12 +243,13 @@ class Ghost(object):
             logger.debug("Set up aucmd: %s", change_cmd)
         except Exception as ex:
             logger.error("Caught exception handling message: %s", ex)
-            self.nvim.command("echo '%s'" % ex)
+            self.echo("{0}", ex)
 
     def _raise_window(self):
         try:
             if self.linux_window_id:
-                subprocess.call(["xdotool", "windowactivate", self.linux_window_id])
+                subprocess.call(["xdotool", "windowactivate",
+                                 self.linux_window_id])
                 logger.debug("activated window: %s", self.linux_window_id)
             elif self.winapp:
                 logger.debug("WINDOWS: trying to raise window")
@@ -227,10 +259,10 @@ class Ghost(object):
                     self.winapp.windows()[0].ShowInTaskbar()
                 except Exception as e:
                     logger.warning("Error during _raise_window, %s", e)
-            elif self.darwinapp:
+            elif self.darwin_app:
                 logger.debug("Darwin: trying to raise window")
                 subprocess.call(["osascript", "-e",
-                                 'tell application "' + self.darwinapp +
+                                 'tell application "' + self.darwin_app +
                                  '" to activate'])
         except Exception as e:
             # with vim yarp etc - letting an exception escape messes
